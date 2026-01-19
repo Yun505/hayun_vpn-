@@ -1,0 +1,16 @@
+# Python virtual environment
+venv/
+env/
+ENV/
+
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/

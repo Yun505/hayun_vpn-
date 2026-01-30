@@ -179,3 +179,109 @@ def parse_handshake_response_packet(packet_bytes):
         'server_nonce': server_nonce,
         'mac': mac
     }
+
+def build_data_packet(sequence_number, ciphertext):
+    """
+    Build a data packet with encrypted payload.
+    
+    Format:
+    ┌──────────┬─────────┬──────────────┬─────────────┬──────────────┐
+    │ Version  │  Type   │  Sequence #  │ Ciphertext  │  Auth Tag    │
+    │ (1 byte) │ (1 byte)│  (8 bytes)   │ (N bytes)   │  (16 bytes)  │
+    └──────────┴─────────┴──────────────┴─────────────┴──────────────┘
+    
+    Args:
+        sequence_number (int): 64-bit sequence number (0 to 2^64-1)
+        ciphertext (bytes): Encrypted payload with auth tag
+        
+    Returns:
+        bytes: Serialized packet
+        
+    Raises:
+        ValueError: If sequence number out of range or ciphertext too large
+    """
+    # Validate sequence number
+    if not (0 <= sequence_number < 2**64):
+        raise ValueError(f"Sequence number must be 0-{2**64-1}")
+    
+    # Validate ciphertext size
+    if len(ciphertext) > MAX_PAYLOAD_SIZE:
+        raise ValueError(
+            f"Ciphertext too large: {len(ciphertext)} bytes "
+            f"(max {MAX_PAYLOAD_SIZE})"
+        )
+    
+    # Build header: version + type + sequence
+    # 'Q' = unsigned long long (8 bytes, 64-bit)
+    header = struct.pack(
+        '!BBQ',
+        PROTOCOL_VERSION,
+        PACKET_TYPE_DATA,
+        sequence_number
+    )
+    
+    # Append ciphertext (already includes auth tag from encrypt_data)
+    packet = header + ciphertext
+    
+    return packet
+
+
+def parse_data_packet(packet_bytes):
+    """
+    Parse a data packet.
+    
+    Args:
+        packet_bytes (bytes): Raw packet data
+        
+    Returns:
+        dict: {
+            'version': int,
+            'type': int,
+            'sequence_number': int,
+            'ciphertext': bytes  # Includes auth tag
+        }
+        
+    Raises:
+        PacketError: If packet is malformed or too small
+    """
+    # Minimum size: header (10 bytes) + auth tag (16 bytes)
+    min_size = DATA_HEADER_SIZE + AUTH_TAG_SIZE
+    
+    if len(packet_bytes) < min_size:
+        raise PacketError(
+            f"Data packet too small: {len(packet_bytes)} bytes "
+            f"(minimum {min_size})"
+        )
+    
+    # Check maximum size
+    if len(packet_bytes) > MAX_PACKET_SIZE:
+        raise PacketError(
+            f"Data packet too large: {len(packet_bytes)} bytes "
+            f"(max {MAX_PACKET_SIZE})"
+        )
+    
+    # Parse header
+    try:
+        version, packet_type, sequence_number = struct.unpack(
+            '!BBQ',
+            packet_bytes[:DATA_HEADER_SIZE]
+        )
+    except struct.error as e:
+        raise PacketError(f"Failed to parse header: {e}")
+    
+    # Validate version and type
+    if version != PROTOCOL_VERSION:
+        raise PacketError(f"Unsupported protocol version: {version}")
+    
+    if packet_type != PACKET_TYPE_DATA:
+        raise PacketError(f"Wrong packet type: {packet_type}")
+    
+    # Extract ciphertext (everything after header)
+    ciphertext = packet_bytes[DATA_HEADER_SIZE:]
+    
+    return {
+        'version': version,
+        'type': packet_type,
+        'sequence_number': sequence_number,
+        'ciphertext': ciphertext
+    }

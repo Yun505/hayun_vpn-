@@ -188,3 +188,269 @@ def verify_handshake_mac(psk, client_nonce, server_nonce, received_mac):
     is_valid = hmac.compare_digest(received_mac, expected_mac)
     
     return is_valid
+class HandshakeState:
+    """
+    Track handshake state for client or server.
+    
+    States:
+    - INIT: Handshake not started
+    - WAITING_RESPONSE: Client sent init, waiting for server
+    - WAITING_CONFIRM: Server sent response, waiting for client confirm
+    - CONFIRMED: Handshake complete, session key established
+    - FAILED: Handshake failed (authentication error, timeout, etc.)
+    
+    Design Note:
+        Why use a class instead of just variables?
+        - Encapsulation: All handshake state in one place
+        - Methods can enforce valid state transitions
+        - Easier to reset/debug
+        - Can add timeout tracking later
+    """
+    INIT = "INIT"
+    WAITING_RESPONSE = "WAITING_RESPONSE"
+    WAITING_CONFIRM = "WAITING_CONFIRM"
+    CONFIRMED = "CONFIRMED"
+    FAILED = "FAILED"
+    
+    def __init__(self):
+        self.state = self.INIT
+        self.client_nonce = None
+        self.server_nonce = None
+        self.session_key = None
+    
+    def is_complete(self):
+        """Check if handshake is successfully completed."""
+        return self.state == self.CONFIRMED
+    
+    def has_failed(self):
+        """Check if handshake has failed."""
+        return self.state == self.FAILED
+
+
+def handshake_client_init(psk):
+    """
+    CLIENT STEP 1: Initiate handshake.
+    
+    Generate a random nonce and build init packet.
+    
+    Args:
+        psk (bytes): Pre-shared key
+        
+    Returns:
+        tuple: (packet_bytes, handshake_state)
+        - packet_bytes: Init packet to send to server
+        - handshake_state: State object to track progress
+        
+    Design Rationale:
+        Why return both packet AND state?
+        - Packet: What to send on network
+        - State: What to remember for next steps
+        
+        Alternative: Return just packet, let caller track state
+        - Easy to lose state
+        - Caller has to know internals
+        
+        Better: Return both
+        - Self-contained
+        - Caller just needs to store state object
+    """
+    # Generate random nonce
+    # Why random? Ensures uniqueness even if PSK is reused
+    client_nonce = generate_nonce()
+    
+    # Build packet
+    from core.protocol import build_handshake_init_packet
+    packet = build_handshake_init_packet(client_nonce)
+    
+    # Create state object to track handshake progress
+    state = HandshakeState()
+    state.state = HandshakeState.WAITING_RESPONSE
+    state.client_nonce = client_nonce
+    # server_nonce and session_key still None (don't have them yet)
+    
+    return packet, state
+
+
+def handshake_client_process_response(psk, state, response_packet):
+    """
+    CLIENT STEP 2: Process server's response.
+    
+    Verify server's MAC, then send confirmation.
+    
+    Args:
+        psk (bytes): Pre-shared key
+        state (HandshakeState): State from init
+        response_packet (bytes): Server's response packet
+        
+    Returns:
+        tuple: (confirm_packet, updated_state)
+        - confirm_packet: Confirmation to send to server (or None if failed)
+        - updated_state: Updated state object
+        
+    Raises:
+        ValueError: If handshake state is wrong
+        
+    Design Critical:
+        This function performs AUTHENTICATION.
+        If MAC verification fails, we ABORT immediately.
+        Never proceed with untrusted server!
+    """
+    # Validate we're in correct state
+    if state.state != HandshakeState.WAITING_RESPONSE:
+        raise ValueError(f"Wrong state for processing response: {state.state}")
+    
+    # Parse server's response
+    from core.protocol import parse_handshake_response_packet
+    try:
+        parsed = parse_handshake_response_packet(response_packet)
+    except Exception as e:
+        # Malformed packet - handshake fails
+        state.state = HandshakeState.FAILED
+        return None, state
+    
+    server_nonce = parsed['server_nonce']
+    server_mac = parsed['mac']
+    
+    # CRITICAL SECURITY CHECK: Verify server's MAC
+    # This proves server knows the PSK
+    is_valid = verify_handshake_mac(
+        psk,
+        state.client_nonce,  # We sent this in step 1
+        server_nonce,        # Server just sent this
+        server_mac           # Server's proof it knows PSK
+    )
+    
+    if not is_valid:
+        # MAC doesn't match - server doesn't know PSK!
+        # This could be:
+        # - Wrong PSK configured
+        # - Man-in-the-middle attack
+        # - Network corruption
+        # Either way: ABORT!
+        state.state = HandshakeState.FAILED
+        return None, state
+    
+    # MAC is valid - server is authentic!
+    # Store server's nonce
+    state.server_nonce = server_nonce
+    
+    # Derive session key
+    # Both client and server will compute this same key
+    session_key = derive_session_key(psk, state.client_nonce, server_nonce)
+    state.session_key = session_key
+    
+    # Compute our own MAC to prove WE know the PSK
+    client_mac = compute_handshake_mac(psk, state.client_nonce, server_nonce)
+    
+    # Build confirmation packet
+    from core.protocol import build_handshake_confirm_packet
+    confirm_packet = build_handshake_confirm_packet(client_mac)
+    
+    # Update state
+    state.state = HandshakeState.CONFIRMED
+    
+    return confirm_packet, state
+
+
+def handshake_server_process_init(psk, init_packet):
+    """
+    SERVER STEP 1: Process client's init, send response.
+    
+    Args:
+        psk (bytes): Pre-shared key
+        init_packet (bytes): Client's init packet
+        
+    Returns:
+        tuple: (response_packet, handshake_state)
+        - response_packet: Response to send to client
+        - handshake_state: State to track handshake
+        
+    Design Note:
+        Server doesn't send first, so no separate "init" function.
+        This is the server's first handshake action.
+    """
+    # Parse client's init
+    from core.protocol import parse_handshake_init_packet
+    try:
+        parsed = parse_handshake_init_packet(init_packet)
+    except Exception as e:
+        # Malformed packet - can't proceed
+        return None, None
+    
+    client_nonce = parsed['client_nonce']
+    
+    # Generate server's nonce
+    server_nonce = generate_nonce()
+    
+    # Compute MAC to prove we know PSK
+    # This MAC says: "I know PSK, I received your nonce, here's mine"
+    mac = compute_handshake_mac(psk, client_nonce, server_nonce)
+    
+    # Build response packet
+    from core.protocol import build_handshake_response_packet
+    response_packet = build_handshake_response_packet(server_nonce, mac)
+    
+    # Create state
+    state = HandshakeState()
+    state.state = HandshakeState.WAITING_CONFIRM
+    state.client_nonce = client_nonce
+    state.server_nonce = server_nonce
+    # session_key not set yet (wait for client to confirm)
+    
+    return response_packet, state
+
+
+def handshake_server_process_confirm(psk, state, confirm_packet):
+    """
+    SERVER STEP 2: Process client's confirmation.
+    
+    Verify client's MAC to complete handshake.
+    
+    Args:
+        psk (bytes): Pre-shared key
+        state (HandshakeState): State from process_init
+        confirm_packet (bytes): Client's confirm packet
+        
+    Returns:
+        HandshakeState: Updated state (CONFIRMED or FAILED)
+        
+    Design Critical:
+        Final authentication step - if client's MAC is wrong,
+        we REJECT the connection entirely.
+    """
+    # Validate state
+    if state.state != HandshakeState.WAITING_CONFIRM:
+        raise ValueError(f"Wrong state for processing confirm: {state.state}")
+    
+    # Parse confirm packet
+    from core.protocol import parse_handshake_confirm_packet
+    try:
+        parsed = parse_handshake_confirm_packet(confirm_packet)
+    except Exception as e:
+        state.state = HandshakeState.FAILED
+        return state
+    
+    client_mac = parsed['mac']
+    
+    # CRITICAL: Verify client's MAC
+    # This proves client knows the PSK
+    is_valid = verify_handshake_mac(
+        psk,
+        state.client_nonce,
+        state.server_nonce,
+        client_mac
+    )
+    
+    if not is_valid:
+        # Client doesn't know PSK - reject!
+        state.state = HandshakeState.FAILED
+        return state
+    
+    # Client is authentic! Derive session key
+    session_key = derive_session_key(psk, state.client_nonce, state.server_nonce)
+    state.session_key = session_key
+    
+    # Handshake complete
+    state.state = HandshakeState.CONFIRMED
+    
+    return state

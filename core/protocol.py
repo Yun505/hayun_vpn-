@@ -285,3 +285,74 @@ def parse_data_packet(packet_bytes):
         'sequence_number': sequence_number,
         'ciphertext': ciphertext
     }
+
+def build_handshake_confirm_packet(mac):
+    """
+        Build a handshake confirmation packet.
+        Client sends this as the third message to prove it knows PSK.
+        Format:
+        ┌──────────┬─────────┬──────────────────┐
+        │ Version  │  Type   │       MAC        │
+        │ (1 byte) │ (1 byte)│   (32 bytes)     │
+        └──────────┴─────────┴──────────────────┘
+    Args:
+            mac (bytes): 32-byte HMAC-SHA256
+        Returns:
+            bytes: Serialized packet (34 bytes)
+        Design Note:
+    Why separate packet type for confirm?
+            - Distinguishes from server's response (different direction)
+            - 
+    Allows different handling logic
+            - Future-proof (could add extra fields later)
+        """
+    if len(mac) != MAC_SIZE:
+        raise ValueError(f"MAC must be {MAC_SIZE} bytes")
+    
+    packet = struct.pack(
+        '!BB32s',
+        PROTOCOL_VERSION,
+        PACKET_TYPE_HANDSHAKE_CONFIRM,
+        mac
+    )
+    
+    return packet
+
+def parse_handshake_confirm_packet(packet_bytes):
+    """
+    Parse a handshake confirmation packet.
+    
+    Server receives this from client to complete handshake.
+    
+    Args:
+        packet_bytes (bytes): Raw packet data
+        
+    Returns:
+        dict: {'version', 'type', 'mac'}
+        
+    Raises:
+        PacketError: If packet is malformed
+    """
+    if len(packet_bytes) != HANDSHAKE_CONFIRM_SIZE:
+        raise PacketError(
+            f"Handshake confirm packet must be {HANDSHAKE_CONFIRM_SIZE} bytes, "
+            f"got {len(packet_bytes)}"
+        )
+    
+    try:
+        version, packet_type, mac = struct.unpack('!BB32s', packet_bytes)
+    except struct.error as e:
+        raise PacketError(f"Failed to parse packet: {e}")
+    
+    if version != PROTOCOL_VERSION:
+        raise PacketError(f"Unsupported protocol version: {version}")
+    
+    if packet_type != PACKET_TYPE_HANDSHAKE_CONFIRM:
+        raise PacketError(f"Wrong packet type: {packet_type}")
+    
+    return {
+        'version': version,
+        'type': packet_type,
+        'mac': mac
+    }
+

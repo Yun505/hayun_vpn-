@@ -3,8 +3,8 @@ import pytest
 from nacl.exceptions import CryptoError
 
 from core.crypto import (
-    generate_psk, generate_nonce, derive_session_key, encrypt_data, decrypt_data,
-    PSK_SIZE, NONCE_SIZE, SESSION_KEY_SIZE
+    generate_psk, generate_nonce, derive_session_key, encrypt_data, decrypt_data, compute_handshake_mac, verify_handshake_mac,
+    PSK_SIZE, NONCE_SIZE, SESSION_KEY_SIZE, MAC_SIZE
 )
 def test_generate_psk_returns_correct_size():
     """PSK should be exactly 32 bytes."""
@@ -110,3 +110,91 @@ def test_decrypt_tampered_ciphertext_fails():
     
     with pytest.raises(CryptoError):
         decrypt_data(session_key, tampered, nonce)
+
+def test_compute_handshake_mac_returns_correct_size():
+    """MAC should be 32 bytes (HMAC-SHA256 output)."""
+    psk = generate_psk()
+    client_nonce = generate_nonce()
+    server_nonce = generate_nonce()
+    mac = compute_handshake_mac(psk, client_nonce, server_nonce)
+    
+    assert len(mac) == MAC_SIZE  # 32 bytes
+    assert type(mac) == bytes
+    
+def test_compute_handshake_mac_is_deterministic():
+    """Same inputs should always produce same MAC."""
+    psk = generate_psk()
+    client_nonce = generate_nonce()
+    server_nonce = generate_nonce()
+    mac1 = compute_handshake_mac(psk, client_nonce, server_nonce)
+    mac2 = compute_handshake_mac(psk, client_nonce, server_nonce)
+    
+    assert mac1 == mac2  # Deterministic
+    
+def test_compute_handshake_mac_different_nonces_different_mac():
+    """Changing nonces should produce different MAC."""
+    psk = generate_psk()
+    client_nonce1 = generate_nonce()
+    client_nonce2 = generate_nonce()
+    server_nonce = generate_nonce()
+    mac1 = compute_handshake_mac(psk, client_nonce1, server_nonce)
+    mac2 = compute_handshake_mac(psk, client_nonce2, server_nonce)
+    
+    assert mac1 != mac2  # Different nonces = different MAC
+
+def test_verify_handshake_mac_accepts_valid_mac():
+    """Verification should succeed for correct MAC."""
+    psk = generate_psk()
+    client_nonce = generate_nonce()
+    server_nonce = generate_nonce()
+    # Compute valid MAC
+    mac = compute_handshake_mac(psk, client_nonce, server_nonce)
+    # Verify it
+    is_valid = verify_handshake_mac(psk, client_nonce, server_nonce, mac)
+    
+    assert is_valid == True
+    
+def test_verify_handshake_mac_rejects_wrong_mac():
+    """Verification should fail for incorrect MAC."""
+    psk = generate_psk()
+    client_nonce = generate_nonce()
+    server_nonce = generate_nonce()
+    # Create a completely wrong MAC
+    wrong_mac = b'\x00' * 32
+    # Verify it (should fail)
+    is_valid = verify_handshake_mac(psk, client_nonce, server_nonce, wrong_mac)
+    
+    assert is_valid == False
+
+def test_verify_handshake_mac_rejects_tampered_mac():
+    """Verification should fail if MAC is modified."""
+    psk = generate_psk()
+    client_nonce = generate_nonce()
+    server_nonce = generate_nonce()
+    # Compute valid MAC
+    mac = compute_handshake_mac(psk, client_nonce, server_nonce)
+    # Tamper with it (flip one bit)
+    tampered_mac = bytearray(mac)
+    tampered_mac[0] ^= 0x01  # Flip least significant bit
+    tampered_mac = bytes(tampered_mac)
+    
+    # Verify tampered MAC (should fail)
+    is_valid = verify_handshake_mac(psk, client_nonce, server_nonce, tampered_mac)
+    
+    assert is_valid == False
+
+def test_verify_handshake_mac_rejects_wrong_psk():
+    """Verification with different PSK should fail."""
+    psk1 = generate_psk()
+    psk2 = generate_psk()  # Different PSK
+    client_nonce = generate_nonce()
+    server_nonce = generate_nonce()
+    
+    # Compute MAC with PSK1
+    mac = compute_handshake_mac(psk1, client_nonce, server_nonce)
+    
+    # Try to verify with PSK2 (should fail)
+    is_valid = verify_handshake_mac(psk2, client_nonce, server_nonce, mac)
+    
+    assert is_valid == False
+    

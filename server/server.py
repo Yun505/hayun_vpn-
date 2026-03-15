@@ -3,7 +3,7 @@ MST VPN Server
 
 Listens for client connections, performs handshake, echoes messages back.
 """
-
+from core.replay import SlidingWindow
 import socket
 import sys
 from core.crypto import (
@@ -55,6 +55,7 @@ class VPNServer:
         self.handshake_state = None
         self.session_key = None
         self.sequence_number = 0
+        self.replay_window = SlidingWindow(window_size=64)
         
         print(f"[SERVER] Initialized on port {port}")
     
@@ -198,6 +199,7 @@ class VPNServer:
         
         print(f"[SERVER] ✓ Handshake complete with {addr}!")
         print(f"[SERVER] Session established. Ready to receive data.")
+        self.replay_window.reset()
         print()
     
     def _handle_data_packet(self, packet_data, addr):
@@ -223,15 +225,23 @@ class VPNServer:
             ciphertext = parsed['ciphertext']
             
             print(f"[SERVER] Received data packet (seq #{sequence_number}, "
-                  f"{len(packet_data)} bytes)")
+                f"{len(packet_data)} bytes)")
             
-            # TODO Phase 5: Check for replay attack
+            # REPLAY PROTECTION CHECK
+            if not self.replay_window.should_accept(sequence_number):
+                print(f"[SERVER] REPLAY ATTACK DETECTED! Rejecting seq #{sequence_number}")
+                print(f"[SERVER] Window: {self.replay_window.get_stats()}")
+                return  # Reject packet
             
             # Decrypt
             nonce = sequence_number.to_bytes(24, 'big')
             plaintext = decrypt_data(self.session_key, ciphertext, nonce)
             
             print(f"[SERVER] Decrypted message: {plaintext.decode('utf-8')}")
+            
+            # Mark as received AFTER successful decryption
+            # Why after? If decryption fails, don't mark it (might be corrupted)
+            self.replay_window.mark_received(sequence_number)
             
             # Echo back (send same message back to client)
             self._send_message(plaintext)
@@ -240,8 +250,7 @@ class VPNServer:
             print(f"[SERVER] ERROR: Malformed packet - {e}")
         
         except Exception as e:
-            print(f"[SERVER] ERROR handling data packet: {e}")
-    
+            print(f"[SERVER] ERROR handling data packet: {e}") 
     def _send_message(self, plaintext):
         """
         Send encrypted message to client.

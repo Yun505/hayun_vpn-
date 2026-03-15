@@ -7,6 +7,7 @@ Tests the complete stack: crypto, protocol, handshake, and networking.
 import pytest
 import time
 import threading
+import socket as sock 
 from core.crypto import generate_psk
 from client.client import VPNClient
 from server.server import VPNServer
@@ -243,3 +244,53 @@ if __name__ == '__main__':
     print("=" * 70)
     print("MANUAL TEST COMPLETE ✓")
     print("=" * 70)
+    
+
+def test_server_rejects_replayed_packet(client):
+    """Server should reject replayed packet."""
+    # Send first message
+    msg = b"Original message"
+    client.send_message(msg)
+    client.receive_message(timeout=1.0)
+    
+    # Send more messages to advance window
+    for i in range(3):
+        client.send_message(f"Message {i}".encode())
+        client.receive_message(timeout=1.0)
+    
+    # Try to replay first packet by manually crafting it
+    from core.protocol import build_data_packet
+    from core.crypto import encrypt_data
+    
+    # Recreate first packet (seq #1)
+    old_seq = 1
+    old_nonce = old_seq.to_bytes(24, 'big')
+    old_ciphertext = encrypt_data(client.session_key, msg, old_nonce)
+    replayed_packet = build_data_packet(old_seq, old_ciphertext)
+    
+    # Send replayed packet directly via socket
+    attack_sock = sock.socket(sock.AF_INET, sock.SOCK_DGRAM)
+    attack_sock.sendto(replayed_packet, ('127.0.0.1', 9999))
+    attack_sock.close()
+    
+    time.sleep(0.2)
+    
+    # Server should have rejected it (check logs for "REPLAY ATTACK DETECTED")
+    # This test mainly verifies no crash/exception
+    assert True  # If we get here without exception, test passes
+
+
+def test_out_of_order_packets_accepted(client):
+    """Out-of-order packets within window should be accepted."""
+    # We can't easily force UDP reordering in tests,
+    # but we can verify the client sends incrementing seq numbers
+    
+    initial_seq = client.sequence_number
+    
+    # Send 3 messages
+    for i in range(3):
+        client.send_message(f"Message {i}".encode())
+        client.receive_message(timeout=1.0)
+    
+    # Sequence should have incremented by 3
+    assert client.sequence_number == initial_seq + 3

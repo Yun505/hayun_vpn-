@@ -3,7 +3,7 @@ MST VPN Client
 
 Connects to server, performs handshake, sends/receives encrypted data.
 """
-
+from core.replay import SlidingWindow
 import socket
 import sys
 import time
@@ -73,6 +73,7 @@ class VPNClient:
         self.handshake_state = None  # Set during handshake
         self.session_key = None  # Set after successful handshake
         self.sequence_number = 0  # Incremented for each data packet
+        self.replay_window = SlidingWindow(window_size=64) # For replay attack prevention 
         
         print(f"[CLIENT] Initialized. Server: {server_host}:{server_port}")
     
@@ -253,14 +254,19 @@ class VPNClient:
             
             print(f"[CLIENT] Packet seq #{sequence_number}")
             
-            # TODO Phase 5: Check for replay attack here
-            # For now, we just decrypt everything
+            # REPLAY PROTECTION
+            if not self.replay_window.should_accept(sequence_number):
+                print(f"[CLIENT] WARNING: Replay detected from server! Seq #{sequence_number}")
+                return None
             
             # Create nonce from sequence number
             nonce = sequence_number.to_bytes(24, 'big')
             
             # Decrypt
             plaintext = decrypt_data(self.session_key, ciphertext, nonce)
+            
+            # Mark as received AFTER successful decryption
+            self.replay_window.mark_received(sequence_number)
             
             print(f"[CLIENT] ✓ Message decrypted ({len(plaintext)} bytes)")
             
